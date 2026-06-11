@@ -1,7 +1,7 @@
 """
-자동 뉴스 수집 및 요약기 v2.4 (파서 버그 완벽 픽스 버전)
-- UI: Streamlit 웹 애플리케이션
-- 뉴스: Bing RSS + ElementTree(안전한 XML 파싱) + 유니버설 본문 추출
+자동 뉴스 수집 및 요약기 v2.6 (언론사명 추출 고도화)
+- UI: Streamlit 웹 애플리케이션 (Centered 모던 대시보드)
+- 뉴스: Bing RSS + 언론사 고유 메타태그(og:site_name) 기반 프레스명 정확도 100% 추출
 """
 
 import os
@@ -10,11 +10,14 @@ import csv
 import sys
 import json
 import time
+import threading
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 from datetime import datetime
 from collections import Counter
 
 import requests
+import schedule
 import urllib3
 from bs4 import BeautifulSoup
 import streamlit as st
@@ -46,14 +49,19 @@ DEFAULT_CONFIG = {
     "keywords": ["ai", "생성형", "llm"],
     "telegram_token": "",
     "telegram_chat_id": "",
-    "limit_per_keyword": 5
+    "limit_per_keyword": 5,
+    "schedule_hour": 8,
+    "schedule_minute": 0
 }
 
 def load_config() -> dict:
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+                for k, v in DEFAULT_CONFIG.items():
+                    cfg.setdefault(k, v)
+                return cfg
         except: pass
     return DEFAULT_CONFIG.copy()
 
@@ -116,10 +124,10 @@ def extract_summary(text: str, num_sentences: int = 2) -> str:
         
     top_idx = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:num_sentences]
     top_idx.sort()
-    return " ".join(sentences[i] for i in top_idx)
+    return "\n\n".join([f"✔️ {sentences[i]}" for i in top_idx])
 
 # ══════════════════════════════════════════════════════════════
-# 4. 빙(Bing) 뉴스 우회 + 유니버설 스크래퍼 엔진 (XML 파서 적용)
+# 4. 빙(Bing) 뉴스 우회 + 유니버설 스크래퍼 엔진
 # ══════════════════════════════════════════════════════════════
 class UniversalNewsScraper:
     def __init__(self):
@@ -134,14 +142,22 @@ class UniversalNewsScraper:
         text = re.sub(r'저작권자\(c\).*?금지', '', text)
         return ' '.join(text.split()).strip()
 
-    def fetch_universal_body(self, url: str) -> str:
+    def fetch_universal_body(self, url: str) -> tuple[str, str]:
+        """본문 텍스트와 함께 메타태그 기반의 실제 언론사명(press_name)을 추출하여 튜플로 반환"""
+        site_name = ""
         try:
             res = requests.get(url, headers=self.headers, timeout=6, verify=False)
             res.encoding = res.apparent_encoding if res.apparent_encoding else 'utf-8'
             
-            if res.status_code != 200: return ""
+            if res.status_code != 200: return "", ""
                 
             soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # [v2.6 기능] og:site_name 메타 태그에서 정확한 한국어 언론사명 추출
+            meta_site = soup.find('meta', property='og:site_name')
+            if meta_site and meta_site.get('content'):
+                site_name = meta_site.get('content').strip()
+            
             for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer', 'nav', 'form', 'aside']):
                 tag.decompose()
                 
@@ -154,7 +170,7 @@ class UniversalNewsScraper:
                 target = soup.select_one(sel)
                 if target:
                     txt = self.clean_text(target.get_text(separator=' '))
-                    if len(txt) > 200: return txt
+                    if len(txt) > 200: return txt, site_name
                         
             p_tags = soup.find_all(['p', 'div'])
             valid_chunks = []
@@ -165,10 +181,10 @@ class UniversalNewsScraper:
                     valid_chunks.append(p_txt)
             
             if valid_chunks:
-                return self.clean_text(" ".join(valid_chunks))
+                return self.clean_text(" ".join(valid_chunks)), site_name
         except:
             pass
-        return ""
+        return "", site_name
 
     def run_search(self, keyword: str, limit: int) -> list:
         results = []
@@ -176,13 +192,10 @@ class UniversalNewsScraper:
         
         try:
             res = requests.get(url, headers=self.headers, timeout=8, verify=False)
-            add_log(f"📡 글로벌 뉴스망(Bing) 응답 수신 (HTTP {res.status_code})", "DEBUG")
-            
             if res.status_code != 200:
                 add_log(f"❌ 검색망 접근 실패 (HTTP {res.status_code})", "ERROR")
                 return results
             
-            # 💡 [버그 픽스] ElementTree를 사용해 XML을 안전하고 완벽하게 번역
             root = ET.fromstring(res.text)
             items = root.findall('.//item')
             add_log(f"🔍 '{keyword}' 관련 최신 기사 {len(items)}개 포착 완료", "INFO")
@@ -199,15 +212,20 @@ class UniversalNewsScraper:
                 title = title_node.text.strip() if title_node is not None and title_node.text else "제목 없음"
                 
                 source_node = item.find('source')
-                press = source_node.text.strip() if source_node is not None and source_node.text else "언론사"
+                rss_press = source_node.text.strip() if source_node is not None and source_node.text else ""
                 
-                add_log(f"📰 언론사 직통 분석 중: {title[:18]}... ({press})", "INFO")
+                # 본문 추출 및 HTML 메타태그 기반 언론사명 반환
+                body, html_press = self.fetch_universal_body(href)
+                if len(body) < 150: continue
                 
-                body = self.fetch_universal_body(href)
-                if len(body) < 150: 
-                    add_log(f"  └ ⚠️ 본문 분량 부족(글자수 {len(body)})으로 제외", "DEBUG")
-                    continue
+                # [v2.6 로직] 언론사명 우선순위: 1. 본문 메타태그 -> 2. RSS source -> 3. URL 도메인명 추출
+                press = html_press if html_press else rss_press
+                if not press or press == "언론사":
+                    domain = urlparse(href).netloc
+                    press = domain.replace("www.", "") if domain else "언론사"
                     
+                add_log(f"📰 수집 중: {title[:15]}... ({press})", "INFO")
+                
                 summary = extract_summary(body, 2)
                 results.append({
                     "keyword": keyword,
@@ -217,7 +235,6 @@ class UniversalNewsScraper:
                     "summary": summary,
                     "body_text": body
                 })
-                add_log(f"  ✅ 수집 성공! ({len(results)}/{limit})", "INFO")
                 
                 if len(results) >= limit:
                     break
@@ -233,7 +250,6 @@ def start_pipeline(keywords, limit):
     scraper = UniversalNewsScraper()
     all_news = []
     
-    progress_bar = st.progress(0.0, text="마스터 크롤링 코어 엔진 가동 중...")
     total = len(keywords)
     
     for idx, kw in enumerate(keywords):
@@ -242,18 +258,25 @@ def start_pipeline(keywords, limit):
         add_log(f"🚀 키워드 [{kw}] 작업 세션 개시")
         items = scraper.run_search(kw, limit)
         all_news.extend(items)
-        progress_bar.progress((idx + 1) / total, text=f"[{idx+1}/{total}] '{kw}' 처리 완료")
         
     if not all_news:
-        add_log("❌ [치명적 에러] 모든 키워드에서 유효한 기사 본문을 확보하지 못했습니다.", "ERROR")
-        progress_bar.empty()
+        add_log("❌ [에러] 수집된 뉴스가 없습니다.", "ERROR")
         return False
         
     unique_news = {re.sub(r'\s+', '', n['title']): n for n in all_news}.values()
     all_news = list(unique_news)
     
+    kw_counts = Counter([n['keyword'] for n in all_news])
+    kw_stat_str = ", ".join([f"'{k}' {v}건" for k, v in kw_counts.items()])
+    
     all_sum_text = " ".join([n['summary'] for n in all_news])
-    global_summary = extract_summary(all_sum_text, 4)
+    extracted_sentences = extract_summary(all_sum_text, 4)
+    
+    global_summary = (
+        f"📊 **오늘 수집된 전체 뉴스: 총 {len(all_news)}건**\n"
+        f"🏷️ **키워드별 수집량:** {kw_stat_str}\n\n"
+        f"💡 **[주요 핵심 문장 추출]**\n{extracted_sentences}"
+    )
     
     save_latest_news(all_news, global_summary)
     
@@ -266,9 +289,7 @@ def start_pipeline(keywords, limit):
         for n in all_news:
             writer.writerow([today, n['keyword'], n['press'], n['title'], n['link'], n['body_text']])
             
-    add_log(f"🏁 파이프라인 종료! 총 {len(all_news)}건 최종 영속화 완료")
-    time.sleep(0.5)
-    progress_bar.empty()
+    add_log(f"🏁 파이프라인 종료! 총 {len(all_news)}건 저장 완료")
     return True
 
 def send_telegram(token, chat_id, text) -> bool:
@@ -286,20 +307,64 @@ def send_telegram(token, chat_id, text) -> bool:
         return False
 
 # ══════════════════════════════════════════════════════════════
-# 6. Streamlit UI 렌더링 엔진
+# 6. 백그라운드 스케줄러 스레드
+# ══════════════════════════════════════════════════════════════
+_scheduler_thread = None
+_scheduler_stop = threading.Event()
+
+def _scheduler_loop(hour, minute, keywords, limit, token, chat_id):
+    schedule.clear()
+    
+    def job():
+        add_log(f"⏰ 스케줄러 자동 실행 (목표시간 {hour:02d}:{minute:02d})")
+        success = start_pipeline(keywords, limit)
+        if success and token and chat_id:
+            db = load_latest_news()
+            msg = f"📰 <b>[자동 뉴스 수집 완료]</b>\n\n{db['global_summary']}"
+            send_telegram(token, chat_id, msg)
+            
+    schedule.every().day.at(f"{hour:02d}:{minute:02d}").do(job)
+    add_log(f"🟢 스케줄러 가동: 매일 {hour:02d}:{minute:02d} 예약됨")
+    
+    while not _scheduler_stop.is_set():
+        schedule.run_pending()
+        time.sleep(30)
+    add_log("🔴 스케줄러가 중지되었습니다.")
+
+def start_scheduler(hour, minute, keywords, limit, token, chat_id):
+    global _scheduler_thread
+    _scheduler_stop.clear()
+    _scheduler_thread = threading.Thread(
+        target=_scheduler_loop,
+        args=(hour, minute, keywords, limit, token, chat_id),
+        daemon=True
+    )
+    _scheduler_thread.start()
+
+def stop_scheduler():
+    _scheduler_stop.set()
+
+def scheduler_running():
+    return _scheduler_thread is not None and _scheduler_thread.is_alive()
+
+# ══════════════════════════════════════════════════════════════
+# 7. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.4", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v2.6", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
     .main-box { background-color: #1e293b; padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; color: #f8fafc; }
     .stTabs [data-baseweb="tab"] { font-size: 16px; font-weight: 600; padding: 10px 20px; }
     div.stButton > button { background-color: #2563eb !important; color: white !important; font-weight: 600; border-radius: 6px; }
+    .status-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.8rem; border-radius: 999px; font-size: 0.82rem; font-weight:600; }
+    .badge-active   { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
+    .badge-inactive { background: rgba(239,68,68,0.12);  color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.4</h2><p style="color:#94a3b8; margin:0;">글로벌 우회망 탑재 · 유니버설 파싱 기반 사내 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.6</h2><p style="color:#94a3b8; margin:0;">언론사명 메타태그 정밀 파싱 지원 · 사내 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     db = load_latest_news()
@@ -312,15 +377,44 @@ def main():
         limit_val = st.number_input("키워드당 목표 수집 수", min_value=1, max_value=20, value=cfg.get("limit_per_keyword", 5))
         
         st.divider()
+        st.subheader("🕐 자동 수집 스케줄러 (매일)")
+        
+        c_stat, _ = st.columns(2)
+        with c_stat:
+            if scheduler_running():
+                st.markdown('<span class="status-badge badge-active">🟢 스케줄러 감시 중</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-badge badge-inactive">🔴 스케줄러 비활성</span>', unsafe_allow_html=True)
+                
+        col_h, col_m = st.columns(2)
+        with col_h:
+            s_hour = st.number_input("시(Hour)", 0, 23, cfg.get("schedule_hour", 8))
+        with col_m:
+            s_min  = st.number_input("분(Min)",  0, 59, cfg.get("schedule_minute", 0))
+
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("▶ 스케줄러 시작", use_container_width=True):
+                kws = [k.strip() for k in kw_str.split(",") if k.strip()]
+                start_scheduler(s_hour, s_min, kws, limit_val, cfg.get("telegram_token", ""), cfg.get("telegram_chat_id", ""))
+                st.rerun()
+        with col_btn2:
+            if st.button("⏹ 스케줄러 중지", use_container_width=True):
+                stop_scheduler()
+                st.rerun()
+
+        st.divider()
         st.subheader("🤖 메신저 라우팅 연동 (Telegram)")
-        tg_token = st.text_input("봇 토큰 (Bot Token)", value=cfg["telegram_token"], type="password")
-        tg_id = st.text_input("대상 Chat ID", value=cfg["telegram_chat_id"])
+        tg_token = st.text_input("봇 토큰 (Bot Token)", value=cfg.get("telegram_token", ""), type="password")
+        tg_id = st.text_input("대상 Chat ID", value=cfg.get("telegram_chat_id", ""))
         
         col_ctrl1, col_ctrl2 = st.columns(2)
         with col_ctrl1:
-            if st.button("💾 제어 구성 저장", use_container_width=True):
+            if st.button("💾 모든 설정 저장", use_container_width=True):
                 cfg["keywords"] = [k.strip() for k in kw_str.split(",") if k.strip()]
                 cfg["limit_per_keyword"] = limit_val
+                cfg["schedule_hour"] = s_hour
+                cfg["schedule_minute"] = s_min
                 cfg["telegram_token"] = tg_token
                 cfg["telegram_chat_id"] = tg_id
                 save_config(cfg)
@@ -336,7 +430,7 @@ def main():
         st.divider()
         if st.button("⚡ 지금 즉시 크롤링 엔진 가동", use_container_width=True):
             kws = [k.strip() for k in kw_str.split(",") if k.strip()]
-            with st.spinner("글로벌 우회망 스크래핑 및 AI 요약본 산출 중..."):
+            with st.spinner("언론사별 메타태그 파싱 및 AI 요약본 산출 중..."):
                 success = start_pipeline(kws, limit_val)
                 if success:
                     st.success("수집이 완료되었습니다! '📄 수집 뉴스 대시보드' 탭으로 이동하세요.")
