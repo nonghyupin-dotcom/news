@@ -1,8 +1,7 @@
 """
-자동 뉴스 수집 및 요약기 v2.3 (Microsoft Bing 뉴스망 우회 및 유니버설 파싱 엔진)
-- UI: Streamlit 웹 애플리케이션 (Centered 모던 대시보드)
-- 뉴스: AWS 차단이 없는 Bing News RSS 활용 직통 링크 크롤링
-- 안정화: Session State 기반 실시간 중계 로그 + 인코딩 자가 치유
+자동 뉴스 수집 및 요약기 v2.4 (파서 버그 완벽 픽스 버전)
+- UI: Streamlit 웹 애플리케이션
+- 뉴스: Bing RSS + ElementTree(안전한 XML 파싱) + 유니버설 본문 추출
 """
 
 import os
@@ -11,6 +10,7 @@ import csv
 import sys
 import json
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from collections import Counter
 
@@ -119,7 +119,7 @@ def extract_summary(text: str, num_sentences: int = 2) -> str:
     return " ".join(sentences[i] for i in top_idx)
 
 # ══════════════════════════════════════════════════════════════
-# 4. 빙(Bing) 뉴스 우회 탐색기 + 유니버설 스크래퍼 엔진
+# 4. 빙(Bing) 뉴스 우회 + 유니버설 스크래퍼 엔진 (XML 파서 적용)
 # ══════════════════════════════════════════════════════════════
 class UniversalNewsScraper:
     def __init__(self):
@@ -135,7 +135,6 @@ class UniversalNewsScraper:
         return ' '.join(text.split()).strip()
 
     def fetch_universal_body(self, url: str) -> str:
-        """어떤 언론사 웹사이트가 걸려도 본문 핵심부만 강제 추출하는 유니버설 엔진"""
         try:
             res = requests.get(url, headers=self.headers, timeout=6, verify=False)
             res.encoding = res.apparent_encoding if res.apparent_encoding else 'utf-8'
@@ -173,7 +172,6 @@ class UniversalNewsScraper:
 
     def run_search(self, keyword: str, limit: int) -> list:
         results = []
-        # 🛡️ AWS 서버 차단이 없는 마이크로소프트 Bing 뉴스 RSS망으로 우회!
         url = f"https://www.bing.com/news/search?q={requests.utils.quote(keyword)}&format=rss&mkt=ko-KR"
         
         try:
@@ -184,27 +182,30 @@ class UniversalNewsScraper:
                 add_log(f"❌ 검색망 접근 실패 (HTTP {res.status_code})", "ERROR")
                 return results
             
-            soup = BeautifulSoup(res.text, 'html.parser') # RSS XML 파싱
-            items = soup.find_all('item')
+            # 💡 [버그 픽스] ElementTree를 사용해 XML을 안전하고 완벽하게 번역
+            root = ET.fromstring(res.text)
+            items = root.findall('.//item')
             add_log(f"🔍 '{keyword}' 관련 최신 기사 {len(items)}개 포착 완료", "INFO")
             
             seen_urls = set()
             for item in items:
-                href = item.link.get_text(strip=True) if item.link else ""
+                link_node = item.find('link')
+                href = link_node.text.strip() if link_node is not None and link_node.text else ""
+                
                 if not href or href in seen_urls: continue
                 seen_urls.add(href)
                 
-                title = item.title.get_text(strip=True) if item.title else "제목 없음"
+                title_node = item.find('title')
+                title = title_node.text.strip() if title_node is not None and title_node.text else "제목 없음"
                 
-                # 언론사 이름 추출
-                source_tag = item.source
-                press = source_tag.get_text(strip=True) if source_tag else "언론사"
+                source_node = item.find('source')
+                press = source_node.text.strip() if source_node is not None and source_node.text else "언론사"
                 
                 add_log(f"📰 언론사 직통 분석 중: {title[:18]}... ({press})", "INFO")
                 
                 body = self.fetch_universal_body(href)
                 if len(body) < 150: 
-                    add_log(f"  └ ⚠️ 본문 분량 부족(글자수 {len(body)})으로 제외 처리", "DEBUG")
+                    add_log(f"  └ ⚠️ 본문 분량 부족(글자수 {len(body)})으로 제외", "DEBUG")
                     continue
                     
                 summary = extract_summary(body, 2)
@@ -288,7 +289,7 @@ def send_telegram(token, chat_id, text) -> bool:
 # 6. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.3", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v2.4", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
@@ -298,7 +299,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.3</h2><p style="color:#94a3b8; margin:0;">글로벌 우회망 탑재 · 유니버설 파싱 기반 사내 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.4</h2><p style="color:#94a3b8; margin:0;">글로벌 우회망 탑재 · 유니버설 파싱 기반 사내 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     db = load_latest_news()
