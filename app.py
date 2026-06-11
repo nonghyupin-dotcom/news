@@ -1,7 +1,7 @@
 """
-자동 뉴스 수집 및 요약기 v2.2 (유니버설 스크래퍼 및 투명 로그 시스템)
+자동 뉴스 수집 및 요약기 v2.3 (Microsoft Bing 뉴스망 우회 및 유니버설 파싱 엔진)
 - UI: Streamlit 웹 애플리케이션 (Centered 모던 대시보드)
-- 뉴스: 네이버 검색 결과 직통 언론사 링크 크롤링 + 유니버설 본문 추출 엔진
+- 뉴스: AWS 차단이 없는 Bing News RSS 활용 직통 링크 크롤링
 - 안정화: Session State 기반 실시간 중계 로그 + 인코딩 자가 치유
 """
 
@@ -24,7 +24,7 @@ import pandas as pd
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ══════════════════════════════════════════════════════════════
-# 1. 영속성 로그 시스템 (Rerun에도 초기화되지 않는 버퍼)
+# 1. 영속성 로그 시스템
 # ══════════════════════════════════════════════════════════════
 if "internal_logs" not in st.session_state:
     st.session_state["internal_logs"] = []
@@ -35,10 +35,6 @@ def add_log(message: str, level: str = "INFO"):
     st.session_state["internal_logs"].append(log_line)
     if len(st.session_state["internal_logs"]) > 150:
         st.session_state["internal_logs"].pop(0)
-    
-    if level == "ERROR":
-        with open("error.log", "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}\n")
 
 # ══════════════════════════════════════════════════════════════
 # 2. 파일 영속성 시스템
@@ -123,14 +119,12 @@ def extract_summary(text: str, num_sentences: int = 2) -> str:
     return " ".join(sentences[i] for i in top_idx)
 
 # ══════════════════════════════════════════════════════════════
-# 4. 유니버설 슈퍼 스크래퍼 코어 엔지
+# 4. 빙(Bing) 뉴스 우회 탐색기 + 유니버설 스크래퍼 엔진
 # ══════════════════════════════════════════════════════════════
 class UniversalNewsScraper:
     def __init__(self):
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
 
     def clean_text(self, text: str) -> str:
@@ -143,16 +137,15 @@ class UniversalNewsScraper:
     def fetch_universal_body(self, url: str) -> str:
         """어떤 언론사 웹사이트가 걸려도 본문 핵심부만 강제 추출하는 유니버설 엔진"""
         try:
-            res = requests.get(url, headers=self.headers, timeout=5, verify=False)
+            res = requests.get(url, headers=self.headers, timeout=6, verify=False)
             res.encoding = res.apparent_encoding if res.apparent_encoding else 'utf-8'
             
             if res.status_code != 200: return ""
                 
             soup = BeautifulSoup(res.text, 'html.parser')
-            for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer', 'nav', 'form', 'button', 'aside']):
+            for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer', 'nav', 'form', 'aside']):
                 tag.decompose()
                 
-            # 1단계: 대한민국 주요 언론사 및 네이버 표준 본문 셀렉터 풀가동
             selectors = [
                 '#newsct_article', '#dic_area', '#articleBodyContents', '#articleBody', 
                 '#articleBodyBody', '.article_body', '.article-body', '#article_body', 
@@ -164,11 +157,10 @@ class UniversalNewsScraper:
                     txt = self.clean_text(target.get_text(separator=' '))
                     if len(txt) > 200: return txt
                         
-            # 2단계: 폴백(Fallback) - 30자 이상 순수 한글 문장 밀도 기반 본문 강제 재구성
             p_tags = soup.find_all(['p', 'div'])
             valid_chunks = []
             for p in p_tags:
-                if p.find(['p', 'div']): continue # 최하위 노드만 타격
+                if p.find(['p', 'div']): continue
                 p_txt = p.get_text().strip()
                 if len(p_txt) > 35 and not any(x in p_txt for x in ['Copyright', '저작권', '기자', '무단전재', '댓글']):
                     valid_chunks.append(p_txt)
@@ -181,39 +173,35 @@ class UniversalNewsScraper:
 
     def run_search(self, keyword: str, limit: int) -> list:
         results = []
-        url = f"https://search.naver.com/search.naver?where=news&query={requests.utils.quote(keyword)}&sort=0"
+        # 🛡️ AWS 서버 차단이 없는 마이크로소프트 Bing 뉴스 RSS망으로 우회!
+        url = f"https://www.bing.com/news/search?q={requests.utils.quote(keyword)}&format=rss&mkt=ko-KR"
+        
         try:
             res = requests.get(url, headers=self.headers, timeout=8, verify=False)
-            add_log(f"📡 네이버 검색 결과 회선 응답 수신 (HTTP {res.status_code})", "DEBUG")
+            add_log(f"📡 글로벌 뉴스망(Bing) 응답 수신 (HTTP {res.status_code})", "DEBUG")
             
             if res.status_code != 200:
-                add_log(f"❌ 네이버 검색 페이지 접근 거부됨 (HTTP {res.status_code})", "ERROR")
+                add_log(f"❌ 검색망 접근 실패 (HTTP {res.status_code})", "ERROR")
                 return results
             
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            # ✨ [골드 셀렉터] 네이버 개편과 무관한 메인 헤드라인 타겟팅
-            title_elements = soup.select('a.news_tit')
-            add_log(f"🔍 '{keyword}' 결과 내 주요 기사 원본 링크 {len(title_elements)}개 포착 완료", "INFO")
+            soup = BeautifulSoup(res.text, 'html.parser') # RSS XML 파싱
+            items = soup.find_all('item')
+            add_log(f"🔍 '{keyword}' 관련 최신 기사 {len(items)}개 포착 완료", "INFO")
             
             seen_urls = set()
-            for a in title_elements:
-                href = a.get('href', '')
+            for item in items:
+                href = item.link.get_text(strip=True) if item.link else ""
                 if not href or href in seen_urls: continue
                 seen_urls.add(href)
                 
-                title = a.get_text(strip=True) or "제목 없음"
+                title = item.title.get_text(strip=True) if item.title else "제목 없음"
                 
-                # 소속 언론사 이름 추적
-                press = "언론사"
-                parent_bx = a.find_parent('li', class_='bx') or a.find_parent('div')
-                if parent_bx:
-                    press_el = parent_bx.select_one('a.info.press') or parent_bx.select_one('.press')
-                    if press_el: press = press_el.get_text(strip=True)
+                # 언론사 이름 추출
+                source_tag = item.source
+                press = source_tag.get_text(strip=True) if source_tag else "언론사"
                 
-                add_log(f"📰 기사 본문 분석 중: {title[:18]}... ({press})", "INFO")
+                add_log(f"📰 언론사 직통 분석 중: {title[:18]}... ({press})", "INFO")
                 
-                # 본문 수집 실행
                 body = self.fetch_universal_body(href)
                 if len(body) < 150: 
                     add_log(f"  └ ⚠️ 본문 분량 부족(글자수 {len(body)})으로 제외 처리", "DEBUG")
@@ -300,7 +288,7 @@ def send_telegram(token, chat_id, text) -> bool:
 # 6. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.2", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v2.3", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
@@ -310,7 +298,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.2</h2><p style="color:#94a3b8; margin:0;">유니버설 원문 파싱 엔진 탑재 · 사내 뉴스 스크랩 자동화 시스템</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.3</h2><p style="color:#94a3b8; margin:0;">글로벌 우회망 탑재 · 유니버설 파싱 기반 사내 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     db = load_latest_news()
@@ -347,7 +335,7 @@ def main():
         st.divider()
         if st.button("⚡ 지금 즉시 크롤링 엔진 가동", use_container_width=True):
             kws = [k.strip() for k in kw_str.split(",") if k.strip()]
-            with st.spinner("언론사 웹서버 직통 크롤링 및 AI 요약본 산출 중..."):
+            with st.spinner("글로벌 우회망 스크래핑 및 AI 요약본 산출 중..."):
                 success = start_pipeline(kws, limit_val)
                 if success:
                     st.success("수집이 완료되었습니다! '📄 수집 뉴스 대시보드' 탭으로 이동하세요.")
@@ -404,9 +392,7 @@ def main():
                             st.error("전송 실패. 텔레그램 설정을 세팅해 주세요.")
 
     with tab3:
-        st.subheader("🖥 "
-                     ""
-                     "️ 실시간 백엔드 가동 로그")
+        st.subheader("🖥️ 실시간 백엔드 가동 로그")
         if not st.session_state["internal_logs"]:
             st.caption("대기 중... 로그 기록이 없습니다.")
         else:
