@@ -1,5 +1,8 @@
 """
-자동 뉴스 수집 및 요약기 v2.1 (디버깅 및 차단 우회 강화 버전)
+자동 뉴스 수집 및 요약기 v2.2 (유니버설 스크래퍼 및 투명 로그 시스템)
+- UI: Streamlit 웹 애플리케이션 (Centered 모던 대시보드)
+- 뉴스: 네이버 검색 결과 직통 언론사 링크 크롤링 + 유니버설 본문 추출 엔진
+- 안정화: Session State 기반 실시간 중계 로그 + 인코딩 자가 치유
 """
 
 import os
@@ -8,12 +11,10 @@ import csv
 import sys
 import json
 import time
-import logging
 from datetime import datetime
 from collections import Counter
 
 import requests
-import schedule
 import urllib3
 from bs4 import BeautifulSoup
 import streamlit as st
@@ -22,6 +23,9 @@ import pandas as pd
 # SSL 경고 억제
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ══════════════════════════════════════════════════════════════
+# 1. 영속성 로그 시스템 (Rerun에도 초기화되지 않는 버퍼)
+# ══════════════════════════════════════════════════════════════
 if "internal_logs" not in st.session_state:
     st.session_state["internal_logs"] = []
 
@@ -29,13 +33,16 @@ def add_log(message: str, level: str = "INFO"):
     now = datetime.now().strftime("%H:%M:%S")
     log_line = f"[{now}] [{level}] {message}"
     st.session_state["internal_logs"].append(log_line)
-    if len(st.session_state["internal_logs"]) > 100:
+    if len(st.session_state["internal_logs"]) > 150:
         st.session_state["internal_logs"].pop(0)
     
     if level == "ERROR":
         with open("error.log", "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}\n")
 
+# ══════════════════════════════════════════════════════════════
+# 2. 파일 영속성 시스템
+# ══════════════════════════════════════════════════════════════
 CONFIG_FILE = "config.json"
 DATA_FILE = "latest_news.json"
 
@@ -75,6 +82,9 @@ def load_latest_news() -> dict:
         except: pass
     return {"last_collected": "", "global_summary": "", "news_data": []}
 
+# ══════════════════════════════════════════════════════════════
+# 3. 빈도 기반 문장 추출 요약기
+# ══════════════════════════════════════════════════════════════
 def extract_summary(text: str, num_sentences: int = 2) -> str:
     if not text or len(text.strip()) < 10:
         return "본문 내용이 너무 짧아 요약할 수 없습니다."
@@ -112,37 +122,61 @@ def extract_summary(text: str, num_sentences: int = 2) -> str:
     top_idx.sort()
     return " ".join(sentences[i] for i in top_idx)
 
-class NewsScraper:
+# ══════════════════════════════════════════════════════════════
+# 4. 유니버설 슈퍼 스크래퍼 코어 엔지
+# ══════════════════════════════════════════════════════════════
+class UniversalNewsScraper:
     def __init__(self):
-        # 🕵️ 완벽한 최신 윈도우 크롬 브라우저로 대폭 위장
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cache-Control": "max-age=0"
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
         }
 
     def clean_text(self, text: str) -> str:
         text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '', text)
         text = re.sub(r'^\[[^\]]+\]|^\([^\)]+\)|^【[^】]+】', '', text)
         text = re.sub(r'무단\s*전재\s*및\s*재배포\s*금지', '', text)
+        text = re.sub(r'저작권자\(c\).*?금지', '', text)
         return ' '.join(text.split()).strip()
 
-    def fetch_naver_body(self, url: str) -> str:
+    def fetch_universal_body(self, url: str) -> str:
+        """어떤 언론사 웹사이트가 걸려도 본문 핵심부만 강제 추출하는 유니버설 엔진"""
         try:
             res = requests.get(url, headers=self.headers, timeout=5, verify=False)
-            if res.status_code != 200:
-                add_log(f"⚠ 본문 서버 접근 불가 (HTTP {res.status_code}) -> {url[:40]}...", "WARNING")
-                return ""
+            res.encoding = res.apparent_encoding if res.apparent_encoding else 'utf-8'
+            
+            if res.status_code != 200: return ""
                 
             soup = BeautifulSoup(res.text, 'html.parser')
-            for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer']):
+            for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer', 'nav', 'form', 'button', 'aside']):
                 tag.decompose()
-            target = soup.select_one('#dic_area') or soup.select_one('#articleBodyContents') or soup.select_one('#articleBody')
-            if target:
-                return self.clean_text(target.get_text(separator=' '))
-        except Exception as e:
-            add_log(f"본문 파싱 에러: {e}", "ERROR")
+                
+            # 1단계: 대한민국 주요 언론사 및 네이버 표준 본문 셀렉터 풀가동
+            selectors = [
+                '#newsct_article', '#dic_area', '#articleBodyContents', '#articleBody', 
+                '#articleBodyBody', '.article_body', '.article-body', '#article_body', 
+                '#news_body', 'div.story', 'article', '.story', '#article_content', '.article_cc'
+            ]
+            for sel in selectors:
+                target = soup.select_one(sel)
+                if target:
+                    txt = self.clean_text(target.get_text(separator=' '))
+                    if len(txt) > 200: return txt
+                        
+            # 2단계: 폴백(Fallback) - 30자 이상 순수 한글 문장 밀도 기반 본문 강제 재구성
+            p_tags = soup.find_all(['p', 'div'])
+            valid_chunks = []
+            for p in p_tags:
+                if p.find(['p', 'div']): continue # 최하위 노드만 타격
+                p_txt = p.get_text().strip()
+                if len(p_txt) > 35 and not any(x in p_txt for x in ['Copyright', '저작권', '기자', '무단전재', '댓글']):
+                    valid_chunks.append(p_txt)
+            
+            if valid_chunks:
+                return self.clean_text(" ".join(valid_chunks))
+        except:
+            pass
         return ""
 
     def run_search(self, keyword: str, limit: int) -> list:
@@ -150,70 +184,79 @@ class NewsScraper:
         url = f"https://search.naver.com/search.naver?where=news&query={requests.utils.quote(keyword)}&sort=0"
         try:
             res = requests.get(url, headers=self.headers, timeout=8, verify=False)
+            add_log(f"📡 네이버 검색 결과 회선 응답 수신 (HTTP {res.status_code})", "DEBUG")
             
-            # 🔍 [디버깅 추가] 응답 코드 추적
             if res.status_code != 200:
-                add_log(f"❌ 네이버 검색 거부당함! HTTP 상태코드: {res.status_code} (서버 차단 발생)", "ERROR")
+                add_log(f"❌ 네이버 검색 페이지 접근 거부됨 (HTTP {res.status_code})", "ERROR")
                 return results
             
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # ✨ [치트키 셀렉터] 클래스명 변경과 무관하게 페이지 내 모든 네이버 뉴스 포털 링크 강제 수집
-            links = soup.select('a[href*="news.naver.com"]') + soup.select('a[href*="n.news.naver.com"]')
-            
-            if not links:
-                add_log(f"⚠ 네이버 응답은 성공(200)했으나 기사 링크가 0개입니다. (봇 감지/캡차 화면 의심)", "WARNING")
-                add_log(f"📦 수신 텍스트 길이 확인: {len(res.text)} 자", "DEBUG")
-                return results
+            # ✨ [골드 셀렉터] 네이버 개편과 무관한 메인 헤드라인 타겟팅
+            title_elements = soup.select('a.news_tit')
+            add_log(f"🔍 '{keyword}' 결과 내 주요 기사 원본 링크 {len(title_elements)}개 포착 완료", "INFO")
             
             seen_urls = set()
-            for a in links:
+            for a in title_elements:
                 href = a.get('href', '')
-                if href in seen_urls: continue
+                if not href or href in seen_urls: continue
                 seen_urls.add(href)
                 
                 title = a.get_text(strip=True) or "제목 없음"
-                if len(title) < 6: continue # 불완전한 링크 패스
                 
-                body = self.fetch_naver_body(href)
-                if len(body) < 120: continue 
+                # 소속 언론사 이름 추적
+                press = "언론사"
+                parent_bx = a.find_parent('li', class_='bx') or a.find_parent('div')
+                if parent_bx:
+                    press_el = parent_bx.select_one('a.info.press') or parent_bx.select_one('.press')
+                    if press_el: press = press_el.get_text(strip=True)
                 
+                add_log(f"📰 기사 본문 분석 중: {title[:18]}... ({press})", "INFO")
+                
+                # 본문 수집 실행
+                body = self.fetch_universal_body(href)
+                if len(body) < 150: 
+                    add_log(f"  └ ⚠️ 본문 분량 부족(글자수 {len(body)})으로 제외 처리", "DEBUG")
+                    continue
+                    
                 summary = extract_summary(body, 2)
                 results.append({
                     "keyword": keyword,
-                    "press": "네이버뉴스",
+                    "press": press,
                     "title": title,
                     "link": href,
                     "summary": summary,
                     "body_text": body
                 })
+                add_log(f"  ✅ 수집 성공! ({len(results)}/{limit})", "INFO")
+                
                 if len(results) >= limit:
                     break
         except Exception as e:
-            add_log(f"검색 크롤링 중 오류: {e}", "ERROR")
+            add_log(f"검색 엔진 크롤링 중 예외 발생: {e}", "ERROR")
         return results
 
 # ══════════════════════════════════════════════════════════════
-# 5. 데이터 가공 및 파일 물리 저장 시스템
+# 5. 파이프라인 관리자
 # ══════════════════════════════════════════════════════════════
 def start_pipeline(keywords, limit):
-    add_log("⚡ 뉴스 수집 파이프라인 가동...")
-    scraper = NewsScraper()
+    add_log("⚡ 뉴스 수집 종합 파이프라인 시동...")
+    scraper = UniversalNewsScraper()
     all_news = []
     
-    progress_bar = st.progress(0.0, text="크롤링 엔진 시동 중...")
+    progress_bar = st.progress(0.0, text="마스터 크롤링 코어 엔진 가동 중...")
     total = len(keywords)
     
     for idx, kw in enumerate(keywords):
         kw = kw.strip()
         if not kw: continue
-        add_log(f"'{kw}' 키워드 기사 수집 중...")
+        add_log(f"🚀 키워드 [{kw}] 작업 세션 개시")
         items = scraper.run_search(kw, limit)
         all_news.extend(items)
-        progress_bar.progress((idx + 1) / total, text=f"[{idx+1}/{total}] '{kw}' 완료")
+        progress_bar.progress((idx + 1) / total, text=f"[{idx+1}/{total}] '{kw}' 처리 완료")
         
     if not all_news:
-        add_log("❌ 최종 결과: 조건에 맞는 네이버 뉴스 데이터가 완전히 비어있습니다.", "ERROR")
+        add_log("❌ [치명적 에러] 모든 키워드에서 유효한 기사 본문을 확보하지 못했습니다.", "ERROR")
         progress_bar.empty()
         return False
         
@@ -230,11 +273,11 @@ def start_pipeline(keywords, limit):
     csv_path = f"news_{today}/news_list_{today}.csv"
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerow(['수집일시', '키워드', '제목', '링크', '기사원문'])
+        writer.writerow(['수집일시', '키워드', '언론사', '제목', '링크', '기사원문'])
         for n in all_news:
-            writer.writerow([today, n['keyword'], n['title'], n['link'], n['body_text']])
+            writer.writerow([today, n['keyword'], n['press'], n['title'], n['link'], n['body_text']])
             
-    add_log(f"🎉 성공! 총 {len(all_news)}건의 뉴스 동기화 완료")
+    add_log(f"🏁 파이프라인 종료! 총 {len(all_news)}건 최종 영속화 완료")
     time.sleep(0.5)
     progress_bar.empty()
     return True
@@ -254,10 +297,10 @@ def send_telegram(token, chat_id, text) -> bool:
         return False
 
 # ══════════════════════════════════════════════════════════════
-# 7. Streamlit UI Framework
+# 6. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.1", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v2.2", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
@@ -267,7 +310,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.1</h2><p style="color:#94a3b8; margin:0;">실시간 네이버 뉴스 수집 엔진 및 사내 정보 자동화 대시보드 시스템</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & 대시보드 v2.2</h2><p style="color:#94a3b8; margin:0;">유니버설 원문 파싱 엔진 탑재 · 사내 뉴스 스크랩 자동화 시스템</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     db = load_latest_news()
@@ -304,14 +347,14 @@ def main():
         st.divider()
         if st.button("⚡ 지금 즉시 크롤링 엔진 가동", use_container_width=True):
             kws = [k.strip() for k in kw_str.split(",") if k.strip()]
-            with st.spinner("네이버 뉴스 실시간 스크래핑 및 AI 요약본 산출 중..."):
+            with st.spinner("언론사 웹서버 직통 크롤링 및 AI 요약본 산출 중..."):
                 success = start_pipeline(kws, limit_val)
                 if success:
                     st.success("수집이 완료되었습니다! '📄 수집 뉴스 대시보드' 탭으로 이동하세요.")
                     time.sleep(1)
                     st.rerun()
                 else:
-                    st.error("수집 실패. 로그 탭을 검사하세요.")
+                    st.error("수집 실패. 로그 탭에서 원인을 점검하세요.")
 
     with tab2:
         if not db["news_data"]:
@@ -328,13 +371,14 @@ def main():
             
             df = pd.DataFrame([{
                 "번호": i + 1,
+                "언론사": n['press'],
                 "키워드": f"#{n['keyword']}",
                 "기사 제목": n['title']
             } for i, n in enumerate(db["news_data"])])
             
             st.dataframe(df, use_container_width=True, hide_index=True)
             
-            sel_titles = [f"[{n['keyword']}] {n['title']}" for n in db["news_data"]]
+            sel_titles = [f"[{n['press']}] {n['title']}" for n in db["news_data"]]
             selected = st.selectbox("본문을 확인할 기사를 선택하세요.", options=sel_titles)
             
             if selected:
@@ -350,23 +394,24 @@ def main():
                 
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.link_button("🔗 네이버 뉴스 정식 링크 열기", url=item['link'], use_container_width=True)
+                    st.link_button("🔗 뉴스 정식 링크 열기", url=item['link'], use_container_width=True)
                 with c2:
                     if st.button("🚀 이 기사만 텔레그램으로 즉시 전송", use_container_width=True):
-                        msg = f"📰 <b>{item['title']}</b>\n🔍 #{item['keyword']}\n\n<b>[요약]</b>\n{item['summary']}\n\n🔗 링크: {item['link']}"
+                        msg = f"📰 <b>{item['title']}</b>\n🏢 {item['press']} | 🔍 #{item['keyword']}\n\n<b>[요약]</b>\n{item['summary']}\n\n🔗 링크: {item['link']}"
                         if send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg):
                             st.success("텔레그램 전송 완료!")
                         else:
                             st.error("전송 실패. 텔레그램 설정을 세팅해 주세요.")
 
     with tab3:
-        st.subheader("🖥️ 실시간 백엔드 가동 로그")
+        st.subheader("🖥 "
+                     ""
+                     "️ 실시간 백엔드 가동 로그")
         if not st.session_state["internal_logs"]:
             st.caption("대기 중... 로그 기록이 없습니다.")
         else:
-            # 최신 로그가 맨 위로 오도록 반전 정렬
             log_box = "\n".join(st.session_state["internal_logs"][::-1])
-            st.text_area("logs", value=log_box, height=400, label_visibility="collapsed")
+            st.text_area("logs", value=log_box, height=450, label_visibility="collapsed")
             
         if st.button("🗑️ 로그 버퍼 클리어"):
             st.session_state["internal_logs"] = []
