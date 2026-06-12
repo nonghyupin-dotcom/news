@@ -1,5 +1,5 @@
 """
-자동 뉴스 수집 및 요약기 v2.7 (구글 시트 DB 연동 및 팀 게시판 탑재)
+자동 뉴스 수집 및 요약기 v2.8 (구글 DB 연동 안정화 및 TOML 네이티브 파싱)
 """
 
 import os
@@ -64,29 +64,28 @@ def save_config(cfg: dict):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 # ══════════════════════════════════════════════════════════════
-# 2. 구글 시트(DB) 연결 매니저
+# 2. 구글 시트(DB) 연결 매니저 (TOML 네이티브 파싱 도입)
 # ══════════════════════════════════════════════════════════════
 @st.cache_resource(ttl=600)
 def init_gsheets():
-    """스트림릿 시크릿 금고에서 열쇠를 꺼내 구글 시트와 연결합니다."""
     try:
-        if "GCP_KEY_JSON" not in st.secrets:
-            add_log("시크릿 금고에 GCP_KEY_JSON이 없습니다. DB 연동을 건너뜁니다.", "WARNING")
+        # JSON 문자열 대신 TOML 딕셔너리 구조를 직접 불러옵니다 (v2.8)
+        if "gcp_service_account" not in st.secrets:
+            add_log("시크릿 금고에 [gcp_service_account] 섹션이 없습니다.", "WARNING")
             return None, None
             
         scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds_dict = json.loads(st.secrets["GCP_KEY_JSON"], strict=False)
+        # st.secrets를 딕셔너리로 강제 변환하여 안전하게 사용
+        creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         
-        sheet = client.open("News_DB") # 구글 시트 파일 이름 (정확해야 함)
+        sheet = client.open("News_DB")
         
-        # 뉴스DB 시트 탭 연결 및 헤더 초기화
         news_ws = sheet.worksheet("뉴스DB")
         if not news_ws.get_all_values():
             news_ws.append_row(['수집일시', '키워드', '언론사', '제목', '링크', '요약', '기사원문'])
             
-        # 게시판DB 시트 탭 연결 및 헤더 초기화
         board_ws = sheet.worksheet("게시판DB")
         if not board_ws.get_all_values():
             board_ws.append_row(['작성일시', '작성자', '내용'])
@@ -259,19 +258,20 @@ def start_pipeline(keywords, limit):
     st.session_state["global_summary_cache"] = global_summary
     
     # ── 구글 시트(DB)에 데이터 영구 저장 ──
-    news_ws, _ = init_gsheets()
-    if news_ws:
-        rows_to_insert = []
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for n in all_news:
-            # DB 컬럼: ['수집일시', '키워드', '언론사', '제목', '링크', '요약', '기사원문']
-            rows_to_insert.append([now_str, n['keyword'], n['press'], n['title'], n['link'], n['summary'], n['body_text']])
-        if rows_to_insert:
-            try:
+    try:
+        news_ws, _ = init_gsheets()
+        if news_ws:
+            rows_to_insert = []
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for n in all_news:
+                rows_to_insert.append([now_str, n['keyword'], n['press'], n['title'], n['link'], n['summary'], n['body_text']])
+            if rows_to_insert:
                 news_ws.append_rows(rows_to_insert)
                 add_log(f"✅ 구글 시트 DB에 {len(rows_to_insert)}건 영구 저장 완료", "INFO")
-            except Exception as e:
-                add_log(f"구글 시트 저장 실패: {e}", "ERROR")
+        else:
+            add_log("❌ DB 연결 실패로 저장을 건너뛰었습니다.", "ERROR")
+    except Exception as e:
+        add_log(f"구글 시트 저장 중 예기치 않은 오류: {e}", "ERROR")
 
     add_log(f"🏁 파이프라인 종료!", "INFO")
     return True
@@ -321,10 +321,10 @@ def scheduler_running():
     return _scheduler_thread is not None and _scheduler_thread.is_alive()
 
 # ══════════════════════════════════════════════════════════════
-# 7. Streamlit UI 렌더링 엔진 (게시판 탭 추가)
+# 7. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.7", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v2.8", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
@@ -337,14 +337,12 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v2.7</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 영구 연동 및 실시간 사내 소통 게시판 탑재</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v2.8</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 영구 연동 및 실시간 사내 소통 게시판 탑재</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     
-    # 4개의 탭으로 확장
     tab1, tab2, tab3, tab4 = st.tabs(["⚙️ 제어 설정", "📄 누적 뉴스 DB", "💬 의견 게시판", "🖥️ 로그"])
     
-    # ── TAB 1: 설정 ──
     with tab1:
         st.subheader("📊 엔진 파라미터 구성")
         kw_str = st.text_input("수집 키워드 (쉼표 구분)", value=", ".join(cfg["keywords"]))
@@ -384,6 +382,8 @@ def main():
                     
         st.divider()
         if st.button("⚡ 지금 즉시 크롤링 엔진 가동 (DB에 누적)", use_container_width=True):
+            # 캐시를 강제로 지워서 구글 시트 연결을 재시도합니다.
+            st.cache_resource.clear()
             kws = [k.strip() for k in kw_str.split(",") if k.strip()]
             with st.spinner("뉴스 수집 및 구글 시트(DB) 저장 중..."):
                 if start_pipeline(kws, limit_val):
@@ -391,41 +391,33 @@ def main():
                     time.sleep(1)
                     st.rerun()
 
-    # ── TAB 2: 구글 시트에서 읽어오는 누적 뉴스 ──
     with tab2:
         news_ws, _ = init_gsheets()
         if not news_ws:
-            st.error("구글 시트 연동 키(Secrets)가 설정되지 않았거나 시트를 찾을 수 없습니다.")
+            st.error("구글 시트 연동 키(Secrets)가 설정되지 않았거나 시트를 찾을 수 없습니다. (로그 탭을 확인하세요)")
         else:
             records = news_ws.get_all_records()
             if not records:
                 st.info("📭 구글 시트(DB)에 누적된 뉴스가 없습니다. 엔진을 가동해 주세요.")
             else:
-                # 데이터를 최신순(역순)으로 정렬하여 표시
                 df = pd.DataFrame(records)[::-1]
-                
                 st.markdown(f"### 🗄️ 누적 뉴스 DB (총 {len(records)}건)")
                 st.caption("구글 시트에서 실시간으로 데이터를 불러옵니다.")
-                
                 st.dataframe(df[['수집일시', '키워드', '언론사', '제목']], use_container_width=True, hide_index=True)
                 
                 st.divider()
                 st.markdown("### 📰 개별 뉴스 원문 조회")
-                
-                # 최신순 제목 리스트 생성
                 sel_titles = [f"[{r['수집일시'][:10]}] [{r['언론사']}] {r['제목']}" for _, r in df.iterrows()]
                 selected = st.selectbox("DB에서 원문을 조회할 기사를 선택하세요.", options=sel_titles)
                 
                 if selected:
                     idx = sel_titles.index(selected)
-                    item = df.iloc[idx] # 선택된 행 데이터
+                    item = df.iloc[idx]
                     
                     st.markdown(f"#### {item['제목']}")
                     st.caption(f"📅 수집일시: {item['수집일시']} | 🏢 {item['언론사']} | 🔍 #{item['키워드']}")
-                    
                     st.markdown(f"**💡 기사 핵심 요약:**")
                     st.warning(item['요약'])
-                    
                     st.markdown("**📄 기사 전체 본문 원문:**")
                     st.text_area("body", value=item['기사원문'], height=300, label_visibility="collapsed")
                     
@@ -438,14 +430,12 @@ def main():
                             if send_telegram(cfg["telegram_token"], cfg["telegram_chat_id"], msg):
                                 st.success("전송 완료!")
 
-    # ── TAB 3: 팀원 의견 게시판 ──
     with tab3:
         st.markdown("### 💬 사내 뉴스 코멘트 보드")
         st.caption("뉴스를 읽고 팀원들과 의견을 공유하세요. (데이터는 구글 시트에 실시간 저장됩니다)")
         
         _, board_ws = init_gsheets()
         if board_ws:
-            # 글쓰기 폼
             with st.form("board_form"):
                 col_name, col_desc = st.columns([1, 4])
                 with col_name:
@@ -456,7 +446,7 @@ def main():
                 if st.form_submit_button("📢 의견 등록하기"):
                     if author and content:
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        board_ws.append_row([now_str, author, content]) # DB에 한 줄 추가
+                        board_ws.append_row([now_str, author, content])
                         st.success("의견이 성공적으로 등록되었습니다!")
                         time.sleep(1)
                         st.rerun()
@@ -464,8 +454,6 @@ def main():
                         st.warning("작성자와 내용을 모두 입력해주세요.")
             
             st.divider()
-            
-            # 게시글 목록 불러오기
             board_records = board_ws.get_all_records()
             if board_records:
                 for r in reversed(board_records):
@@ -474,7 +462,6 @@ def main():
             else:
                 st.info("아직 등록된 의견이 없습니다. 첫 번째 의견을 남겨보세요!")
 
-    # ── TAB 4: 시스템 로그 ──
     with tab4:
         st.subheader("🖥️ 실시간 백엔드 가동 로그")
         if not st.session_state["internal_logs"]:
