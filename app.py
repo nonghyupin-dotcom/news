@@ -1,5 +1,8 @@
 """
-자동 뉴스 수집 및 요약기 v2.9 (구글 시트 헤더 KeyError 방어 및 안정화)
+자동 뉴스 수집 및 요약기 v3.0 (최종 완성판)
+- 게시판 헤더 독립형 강제 파싱 적용 (무적 게시판)
+- 요약 리포트 기호 버그 수정
+- 구글 시트 DB 완벽 연동
 """
 
 import os
@@ -94,7 +97,7 @@ def init_gsheets():
         return None, None
 
 # ══════════════════════════════════════════════════════════════
-# 3. 빈도 기반 문장 추출 요약기
+# 3. 빈도 기반 문장 추출 요약기 (기호 버그 수정)
 # ══════════════════════════════════════════════════════════════
 def extract_summary(text: str, num_sentences: int = 2) -> str:
     if not text or len(text.strip()) < 10:
@@ -131,7 +134,9 @@ def extract_summary(text: str, num_sentences: int = 2) -> str:
         
     top_idx = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:num_sentences]
     top_idx.sort()
-    return "\n\n".join([f"✔️ {sentences[i]}" for i in top_idx])
+    
+    # [v3.0] 이중 기호 방지를 위해 심플한 불릿 포인트(•) 하나만 적용
+    return "\n\n".join([f"• {sentences[i]}" for i in top_idx])
 
 # ══════════════════════════════════════════════════════════════
 # 4. 빙(Bing) 뉴스 우회 + 유니버설 스크래퍼 엔진
@@ -253,7 +258,6 @@ def start_pipeline(keywords, limit):
     )
     st.session_state["global_summary_cache"] = global_summary
     
-    # ── 구글 시트(DB)에 데이터 저장 ──
     try:
         news_ws, _ = init_gsheets()
         if news_ws:
@@ -320,7 +324,7 @@ def scheduler_running():
 # 7. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v2.9", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v3.0", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
@@ -333,10 +337,9 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v2.9</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 영구 연동 및 실시간 사내 소통 게시판 탑재</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v3.0</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 영구 연동 및 실시간 사내 소통 게시판 탑재</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
-    
     tab1, tab2, tab3, tab4 = st.tabs(["⚙️ 제어 설정", "📄 누적 뉴스 DB", "💬 의견 게시판", "🖥️ 로그"])
     
     with tab1:
@@ -394,7 +397,6 @@ def main():
             records = news_ws.get_all_records()
             df = pd.DataFrame(records)
             
-            # [v2.9] 구글 시트의 헤더가 비어있거나 달라도 앱이 뻗지 않도록 방어 코드 추가
             if df.empty:
                 st.info("📭 구글 시트(DB)에 누적된 뉴스가 없습니다. 1번 탭에서 엔진을 가동해 주세요.")
             else:
@@ -463,19 +465,21 @@ def main():
             
             st.divider()
             try:
-                board_records = board_ws.get_all_records()
-                if board_records:
-                    # 게시판 역시 헤더 검사로 안전하게 출력
-                    for r in reversed(board_records):
-                        b_author = r.get('작성자', '익명')
-                        b_time = r.get('작성일시', '')
-                        b_content = r.get('내용', '')
+                # [v3.0] 헤더 이름에 의존하지 않고 값만 무식하게 빼오는 무적 코드 적용!
+                board_values = board_ws.get_all_values()
+                if len(board_values) > 1: # 헤더 제외하고 작성된 데이터가 있으면
+                    for r in reversed(board_values[1:]): # 첫 줄(헤더) 제외하고 역순 출력
+                        b_time = r[0] if len(r) > 0 else ""
+                        b_author = r[1] if len(r) > 1 and r[1].strip() else "익명"
+                        b_content = r[2] if len(r) > 2 else ""
+                        
                         st.markdown(f"**👤 {b_author}** <span style='color:gray; font-size:0.85em; margin-left:10px;'>{b_time}</span>", unsafe_allow_html=True)
-                        st.info(b_content)
+                        if b_content:
+                            st.info(b_content)
                 else:
                     st.info("아직 등록된 의견이 없습니다. 첫 번째 의견을 남겨보세요!")
-            except:
-                st.info("게시판 데이터를 불러올 수 없습니다. 구글 시트의 1번째 줄(헤더)이 정상인지 확인해주세요.")
+            except Exception as e:
+                st.error(f"데이터를 불러오지 못했습니다: {e}")
 
     with tab4:
         st.subheader("🖥️ 실시간 백엔드 가동 로그")
