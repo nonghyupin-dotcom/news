@@ -1,5 +1,5 @@
 """
-자동 뉴스 수집 및 요약기 v3.2 (통계 대시보드 시각화 기능 추가)
+자동 뉴스 수집 및 요약기 v3.3 (UI/UX 최적화 및 메인 액션 상단 배치)
 """
 
 import os
@@ -319,63 +319,35 @@ def scheduler_running():
 # 7. Streamlit UI 렌더링 엔진
 # ══════════════════════════════════════════════════════════════
 def main():
-    st.set_page_config(page_title="News Web v3.2", page_icon="📰", layout="centered")
+    st.set_page_config(page_title="News Web v3.3", page_icon="📰", layout="centered")
     
     st.markdown("""
     <style>
     .main-box { background-color: #1e293b; padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; color: #f8fafc; }
     .stTabs [data-baseweb="tab"] { font-size: 16px; font-weight: 600; padding: 10px 20px; }
-    div.stButton > button { background-color: #2563eb !important; color: white !important; font-weight: 600; border-radius: 6px; }
+    div.stButton > button { font-weight: 600; border-radius: 6px; }
+    /* 메인 수집 버튼만 특별히 강조 (파란색) */
+    .primary-btn button { background-color: #2563eb !important; color: white !important; font-size: 1.05rem !important; padding: 0.6rem !important; }
     .status-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.8rem; border-radius: 999px; font-size: 0.82rem; font-weight:600; }
     .badge-active   { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
     .badge-inactive { background: rgba(239,68,68,0.12);  color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v3.2</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 연동 · 실시간 소통 게시판 · 통계 시각화 탑재</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-box"><h2>📰 AI 뉴스 크롤러 & DB 대시보드 v3.3</h2><p style="color:#94a3b8; margin:0;">구글 시트(DB) 연동 · 실시간 소통 게시판 · 통계 시각화 탑재</p></div>', unsafe_allow_html=True)
     
     cfg = load_config()
     tab1, tab2, tab3, tab4 = st.tabs(["⚙️ 제어 설정", "📄 누적 뉴스 DB", "💬 의견 게시판", "🖥️ 로그"])
     
+    # ── TAB 1: 설정 (UI 개편) ──
     with tab1:
-        st.subheader("📊 엔진 파라미터 구성")
+        st.subheader("🚀 즉시 수집 및 파라미터")
         kw_str = st.text_input("수집 키워드 (쉼표 구분)", value=", ".join(cfg["keywords"]))
         limit_val = st.number_input("키워드당 목표 수집 수", min_value=1, max_value=20, value=cfg.get("limit_per_keyword", 5))
         
-        st.divider()
-        st.subheader("🕐 자동 수집 스케줄러")
-        c_stat, _ = st.columns(2)
-        with c_stat:
-            if scheduler_running(): st.markdown('<span class="status-badge badge-active">🟢 스케줄러 가동 중</span>', unsafe_allow_html=True)
-            else: st.markdown('<span class="status-badge badge-inactive">🔴 스케줄러 비활성</span>', unsafe_allow_html=True)
-                
-        col_h, col_m = st.columns(2)
-        with col_h: s_hour = st.number_input("시(Hour)", 0, 23, cfg.get("schedule_hour", 8))
-        with col_m: s_min  = st.number_input("분(Min)",  0, 59, cfg.get("schedule_minute", 0))
-
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("▶ 스케줄러 시작", use_container_width=True):
-                kws = [k.strip() for k in kw_str.split(",") if k.strip()]
-                start_scheduler(s_hour, s_min, kws, limit_val, cfg.get("telegram_token", ""), cfg.get("telegram_chat_id", ""))
-                st.rerun()
-        with col_btn2:
-            if st.button("⏹ 스케줄러 중지", use_container_width=True):
-                stop_scheduler()
-                st.rerun()
-
-        st.divider()
-        st.subheader("🤖 텔레그램 연동")
-        tg_token = st.text_input("봇 토큰", value=cfg.get("telegram_token", ""), type="password")
-        tg_id = st.text_input("Chat ID", value=cfg.get("telegram_chat_id", ""))
-        
-        if st.button("💾 모든 설정 저장", use_container_width=True):
-            cfg.update({"keywords": [k.strip() for k in kw_str.split(",") if k.strip()], "limit_per_keyword": limit_val, "schedule_hour": s_hour, "schedule_minute": s_min, "telegram_token": tg_token, "telegram_chat_id": tg_id})
-            save_config(cfg)
-            st.success("저장 완료!")
-                    
-        st.divider()
-        if st.button("⚡ 지금 즉시 크롤링 엔진 가동 (DB에 누적)", use_container_width=True):
+        # [v3.3] 메인 액션 버튼을 최상단으로 끌어올림
+        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+        if st.button("⚡ 지금 즉시 크롤링 엔진 가동 (DB에 누적)", use_container_width=True, type="primary"):
             st.cache_resource.clear()
             kws = [k.strip() for k in kw_str.split(",") if k.strip()]
             with st.spinner("뉴스 수집 및 구글 시트(DB) 저장 중..."):
@@ -383,6 +355,47 @@ def main():
                     st.success("수집 및 DB 저장이 완료되었습니다! '누적 뉴스 DB' 탭을 확인하세요.")
                     time.sleep(1)
                     st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.divider()
+
+        # [v3.3] 옵션 메뉴들은 깔끔하게 아코디언 메뉴(Expander)로 숨김 처리
+        with st.expander("⚙️ 부가 옵션 (자동 스케줄러 및 텔레그램 알림)", expanded=False):
+            st.markdown("#### 🕐 자동 수집 스케줄러")
+            c_stat, _ = st.columns(2)
+            with c_stat:
+                if scheduler_running(): st.markdown('<span class="status-badge badge-active">🟢 스케줄러 가동 중</span>', unsafe_allow_html=True)
+                else: st.markdown('<span class="status-badge badge-inactive">🔴 스케줄러 비활성</span>', unsafe_allow_html=True)
+                    
+            col_h, col_m = st.columns(2)
+            with col_h: s_hour = st.number_input("시(Hour)", 0, 23, cfg.get("schedule_hour", 8))
+            with col_m: s_min  = st.number_input("분(Min)",  0, 59, cfg.get("schedule_minute", 0))
+
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("▶ 스케줄러 시작", use_container_width=True):
+                    kws = [k.strip() for k in kw_str.split(",") if k.strip()]
+                    start_scheduler(s_hour, s_min, kws, limit_val, cfg.get("telegram_token", ""), cfg.get("telegram_chat_id", ""))
+                    st.rerun()
+            with col_btn2:
+                if st.button("⏹ 스케줄러 중지", use_container_width=True):
+                    stop_scheduler()
+                    st.rerun()
+
+            st.divider()
+            st.markdown("#### 🤖 텔레그램 연동")
+            tg_token = st.text_input("봇 토큰", value=cfg.get("telegram_token", ""), type="password")
+            tg_id = st.text_input("Chat ID", value=cfg.get("telegram_chat_id", ""))
+            
+            if st.button("💾 위 설정 저장 및 연동 테스트", use_container_width=True):
+                cfg.update({"keywords": [k.strip() for k in kw_str.split(",") if k.strip()], "limit_per_keyword": limit_val, "schedule_hour": s_hour, "schedule_minute": s_min, "telegram_token": tg_token, "telegram_chat_id": tg_id})
+                save_config(cfg)
+                st.success("설정이 저장되었습니다!")
+                if tg_token and tg_id:
+                    if send_telegram(tg_token, tg_id, "🤖 <b>알림:</b> 뉴스 수집기 원격 라우팅 채널이 활성화되었습니다."):
+                        st.info("텔레그램 발송 성공!")
+                    else:
+                        st.error("발송 실패. 토큰 또는 ID를 체크하세요.")
 
     with tab2:
         news_ws, _ = init_gsheets()
@@ -400,7 +413,6 @@ def main():
                     if col not in df.columns:
                         df[col] = "데이터없음"
                         
-                # ── [v3.2] 통계 시각화 대시보드 영역 ──
                 st.markdown("### 📊 뉴스 수집 데이터 통계")
                 col_chart1, col_chart2 = st.columns(2)
                 
@@ -417,7 +429,6 @@ def main():
                         st.bar_chart(press_counts)
                         
                 st.divider()
-                # ─────────────────────────────────────────
 
                 show_df = df[['수집일시', '키워드', '언론사', '제목']][::-1]
                 
