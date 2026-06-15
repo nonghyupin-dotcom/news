@@ -1,6 +1,5 @@
 """
-깃허브 액션(GitHub Actions) 전용 무인 자동 뉴스 수집기 (batch_scraper.py)
-- 웹 화면(UI) 없이 오직 수집, 요약, 구글 시트 저장, 텔레그램 발송만 수행합니다.
+깃허브 전용 무인 자동 뉴스 수집기 v1.1 (생존 신고 기능 탑재)
 """
 
 import os
@@ -22,8 +21,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==========================================
 # ⚙️ 봇 설정 파라미터 (원하는 대로 수정하세요)
 # ==========================================
-TARGET_KEYWORDS = ["서부발전", "ai", "생성형", "llm"]  # 수집할 키워드 목록
-LIMIT_PER_KEYWORD = 5                             # 키워드당 수집할 기사 수
+TARGET_KEYWORDS = ["한국서부발전", "재생에너지", "ai"]  # [v1.1] 유저님이 원하신 새 키워드로 교체!
+LIMIT_PER_KEYWORD = 5                             
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -31,12 +30,8 @@ def print_log(msg):
     now = datetime.now().strftime("%H:%M:%S")
     print(f"[{now}] {msg}")
 
-# ==========================================
-# 1. 구글 시트 연결
-# ==========================================
 def init_gsheets():
     try:
-        # 깃허브 Secrets에서 구글 키를 가져옵니다.
         gcp_key_str = os.environ.get("GCP_KEY_JSON")
         if not gcp_key_str:
             print_log("❌ [오류] 환경변수에 GCP_KEY_JSON이 없습니다.")
@@ -54,9 +49,6 @@ def init_gsheets():
         print_log(f"❌ 구글 시트 연결 에러: {e}")
         return None
 
-# ==========================================
-# 2. 요약 및 크롤링 엔진
-# ==========================================
 def extract_summary(text: str, num_sentences: int = 2) -> str:
     if not text or len(text.strip()) < 10: return "본문 내용이 너무 짧아 요약할 수 없습니다."
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -167,11 +159,8 @@ def send_telegram(token, chat_id, text):
         requests.post(url, json={"chat_id": chat_id.strip(), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=8, verify=False)
     except: pass
 
-# ==========================================
-# 3. 메인 파이프라인 (실행부)
-# ==========================================
 def main():
-    print_log("🚀 깃허브 무인 자동 수집 봇 가동 시작!")
+    print_log("🚀 깃허브 무인 자동 수집 봇 v1.1 가동!")
     all_news = []
     
     for kw in TARGET_KEYWORDS:
@@ -179,15 +168,16 @@ def main():
         print_log(f"🔍 키워드 [{kw}] 수집 중...")
         all_news.extend(run_search(kw, LIMIT_PER_KEYWORD))
         
+    # [v1.1] 만약 수집된 뉴스가 0건이어도 그냥 안 끝내고 텔레그램 생존 알림 전송!
     if not all_news:
-        print_log("❌ 수집된 뉴스가 없습니다. 종료합니다.")
+        print_log("❌ 오늘 조건에 맞는 뉴스가 0건입니다.")
+        alert_msg = f"🤖 <b>[무인 뉴스 봇 가동 보고]</b>\n\n지정된 키워드로 새로운 기사를 검색했으나, 수집된 뉴스가 <b>0건</b>입니다.\n(검색 엔진 우회 필터링 또는 중복 기사 제외 결과일 수 있습니다)"
+        send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, alert_msg)
         return
         
-    # 중복 제거
     unique_news = {re.sub(r'\s+', '', n['title']): n for n in all_news}.values()
     all_news = list(unique_news)
     
-    # 통계 및 요약 텍스트 생성
     kw_counts = Counter([n['keyword'] for n in all_news])
     kw_stat_str = ", ".join([f"'{k}' {v}건" for k, v in kw_counts.items()])
     all_sum_text = " ".join([n['summary'] for n in all_news])
@@ -200,7 +190,6 @@ def main():
         f"👉 <b>대시보드에서 전체 기사를 확인하세요!</b>"
     )
 
-    # 구글 시트 저장
     news_ws = init_gsheets()
     if news_ws:
         rows_to_insert = []
@@ -210,8 +199,6 @@ def main():
         if rows_to_insert:
             news_ws.append_rows(rows_to_insert)
             print_log(f"✅ 구글 시트 DB에 {len(rows_to_insert)}건 저장 완료!")
-            
-            # 텔레그램 발송 (저장 성공 시에만)
             send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, summary_msg)
             print_log("✅ 텔레그램 요약본 발송 완료!")
     else:
